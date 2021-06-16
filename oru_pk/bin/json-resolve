@@ -1,0 +1,52 @@
+#!/usr/bin/env python
+
+import json
+import argparse
+import sys
+import re
+from pathlib import Path
+from oru.posix import setup_sigpipe, open_default_stdin, open_default_stdout
+from oru.json import resolve_files
+
+def log(msg):
+    print(msg, file=sys.stderr)
+
+
+if __name__ == '__main__':
+    p = argparse.ArgumentParser()
+    p.add_argument("input", default='-', nargs="?")
+    p.add_argument("output", default="-", nargs="?")
+    p.add_argument("-v", "--verbose", action='store_true')
+    p.add_argument("-m", "--match", default=r"\.json$",
+                   help="REGEXP to match strings by, default is '%(default)s'.")
+    p.add_argument("--cwd", action="store_true",
+                   help="Find files relative to the current working directory rather than relative to the input file,"
+                        " if input is STDIN this is always the case.")
+    args = p.parse_args()
+    args.cwd = args.cwd or args.input == "-"
+    setup_sigpipe()
+
+    try:
+        with open_default_stdin(args.input) as fp:
+            d = json.load(fp)
+    except Exception as e:
+        log("error: unable to read input file: " + str(e))
+        sys.exit(1)
+
+    try:
+        pattern = re.compile(args.match)
+    except Exception as e:
+        log("error: bad regexp: " + str(e))
+        sys.exit(1)
+
+    rootpath = Path.cwd() if args.cwd else Path(args.input).parent
+    d = resolve_files(d, rootpath, pattern, logger=log if args.verbose else None)
+
+    try:
+        with open_default_stdout(args.output) as fp:
+            json.dump(d, fp)
+            fp.write("\n")
+            
+    except Exception as e:
+        log("error: unable to write to file: " + str(e))
+        sys.exit(1)

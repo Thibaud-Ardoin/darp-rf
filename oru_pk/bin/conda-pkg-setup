@@ -1,0 +1,140 @@
+#!/usr/bin/env python
+import cerberus
+import json
+from pathlib import Path
+import subprocess
+import yaml
+
+try:
+    from oru.constants import CONDA_INFO
+except ImportError:
+    import sys
+    sys.path.append(str(Path(__file__).parent.parent.resolve()))
+    from oru.constants import CONDA_INFO
+
+def conda_prefix() -> Path:
+    return Path(CONDA_INFO["active_prefix"])
+
+def activate_dir() -> Path:
+    return conda_prefix() / Path("etc/conda/activate.d")
+
+def deactivate_dir() -> Path:
+    return conda_prefix() / Path("etc/conda/deactivate.d")
+
+def activate_pkg_script(data) -> Path:
+    return activate_dir() / Path("010_{name}.sh".format_map(data))
+
+def write_activate_pkg_script(data) -> Path:
+    path = activate_pkg_script(data)
+
+    ref_path = data['file'].parent
+    bin_paths = [ref_path/p for p in data['bin-paths']]
+    bin_paths = ":".join(str(p.resolve()) for p in bin_paths)
+
+    contents = [
+        "#!/bin/bash/\n",
+        f"export PATH={bin_paths}:$PATH\n"
+    ]
+
+    with open(path, 'w') as fp:
+        fp.writelines(contents)
+    return path
+
+def ensure_activate_init_script() -> Path:
+    path = activate_dir() / "000_init.sh"
+    contents = [
+        "#!/bin/bash/\n",
+        "export _CONDA_PKG_SETUP_OLD_PATH=$PATH\n",
+    ]
+    if not path.exists():
+        with open(path, 'w') as fp:
+            fp.writelines(contents)
+        print("wrote", str(path))
+    return path
+
+def ensure_deactivate_script() -> Path:
+    path = deactivate_dir() / "999_init.sh"
+    contents = [
+        "#!/bin/bash/\n",
+        "export PATH=$(echo $_CONDA_PKG_SETUP_OLD_PATH | sed -E \"s;${CONDA_PREFIX}/bin:?;;\")\n",
+        "unset _CONDA_PKG_SETUP_OLD_PATH\n",
+    ]
+
+    if not path.exists():
+        with open(path, 'w') as fp:
+            fp.writelines(contents)
+        print("wrote", str(path))
+    return path
+
+def get_package_root(data) -> Path:
+    ref_path = data['file'].parent
+    package_root = ref_path / data['package-root']
+    return package_root
+
+def load_data(conda_file: Path):
+    with open(conda_file, 'r') as fp:
+        data = yaml.load(fp, yaml.CSafeLoader)
+
+    data['file'] = conda_file.resolve()
+    return data
+
+def confirm_conda_env():
+    env_name = CONDA_INFO['active_prefix_name']
+    while True:
+        char = input(f"install into environment `{env_name}` [y/n]").strip()
+        if char == 'y':
+            return
+        elif char == 'n':
+            exit(0)
+        print("answer `y`  or `n`")
+
+
+def do_install(args):
+    data = load_data(args.conda_file)
+    if not args.skip_confirm:
+        confirm_conda_env()
+    ensure_activate_init_script()
+    ensure_deactivate_script()
+    if len(data['bin-paths']) > 0:
+        p = write_activate_pkg_script(data)
+        print("created activation script: ", str(p))
+    package_root = data['file'].parent/data['package-root']
+    subprocess.check_call(["conda", "develop", str(package_root.resolve())])
+
+
+def do_uninstall(args):
+    data = load_data(args.conda_file)
+    path = activate_pkg_script(data)
+    try:
+        path.unlink()
+        print("removed activation script: ", str(path))
+    except FileNotFoundError:
+        pass
+
+    package_root = data['file'].parent / data['package-root']
+    subprocess.check_call(["conda", "develop", "-u", str(package_root.resolve())])
+
+
+if __name__ == '__main__':
+    import argparse
+
+    p = argparse.ArgumentParser()
+    p.add_argument("cmd", choices=["install", "uninstall"])
+    p.add_argument("-y", action="store_true", help="Install without confirming conda environment.", dest="skip_confirm")
+
+
+    p.add_argument("conda_file", type=Path, default=Path("conda.yaml"), nargs='?')
+    args = p.parse_args()
+
+    if args.cmd == "install":
+        do_install(args)
+    else:
+        do_uninstall(args)
+
+
+
+
+
+
+
+

@@ -1,0 +1,529 @@
+#!/usr/bin/env python
+import oru.slurm
+import oru.posix
+import argparse
+import subprocess
+import sys
+import tempfile
+import os
+import asyncio
+from oru import frozendict
+import re
+import shutil
+import shelve
+import glob
+from itertools import product
+from enum import IntEnum
+from typing import Dict, List, Tuple
+import pygments
+from pygments.lexers.shell import BashLexer
+from pygments.formatters.terminal256 import Terminal256Formatter
+import json
+
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),'.sbatch-harray.data.d')
+DATABASE_FILE = os.path.join(DATA_DIR, 'db')
+SLURM_LOG_DIR = os.path.join(DATA_DIR, 'logs')
+
+SBATCH_COMMAND = ['sbatch', '--parsable']
+SBATCH_FAKE = False
+
+SLURM_INFO_AGGREGATABLE = {
+    'mem',
+    'cpus-per-task',
+    'tasks-per-node',
+    'nodes',
+    'mail-user',
+    'mail-type',
+    'constraint',
+    'time',
+    'script'
+}
+
+SLURM_INFO_NOT_AGGREGATABLE = {
+    'job-name',
+    'out',
+    'err'
+}
+
+
+class ArgSepToken(IntEnum):
+    SEP = 0b00
+    SEP_FILE = 0b01
+    SEP_LINK = 0b10
+    SEP_FILE_LINK = 0b11
+
+    def is_file(self):
+        return bool(self.value & 0b01)
+
+    def is_link(self):
+        return bool(self.value & 0b10)
+
+
+class ArgIndexToken:
+    def __init__(self, i):
+        self.index = i
+
+    def __repr__(self):
+        return f'{self.__class__.__name__}({self.index:d})'
+
+
+class UserError(Exception):
+    def __init__(self, msg):
+        self.msg = msg
+
+def get_arguments(arglists : List[List], slurm_array_index=None):
+    prod = []
+
+    if slurm_array_index is not None:
+        arglist = arglists.pop(slurm_array_index)
+        septype = arglist.pop(0)
+        if septype.is_link():
+            raise UserError("The argument list to use as the Slurm array job index cannot be linked.")
+
+        if septype.is_file():
+            array_job_ids = []
+            for filename in arglist:
+                with open(filename, 'r') as f:
+                    array_job_ids.extend(map(lambda x: x.strip(), f))
+        else:
+            array_job_ids = arglist
+
+        try:
+            array_job_ids = list(map(int, array_job_ids))
+            if any(x < 0 for x in array_job_ids):
+                raise ValueError
+        except ValueError:
+            raise UserError("The argument list specified for Slurm array job index must contain non-negative "
+                            "integers.")
+
+        if len(set(array_job_ids)) < len(array_job_ids):
+            raise UserError("The argument list specified for Slurm array job index must not contain duplicate values.")
+
+    for a in arglists:
+        septype = a.pop(0)
+        if septype.is_file():
+            values = []
+            for filename in a:
+                with open(filename, 'r') as f:
+                    values.extend(filter(lambda l : len(l) > 0, map(lambda x : x.strip().split(), f)))
+        else:
+            values = a
+
+        if septype.is_link():
+            prod[-1] = map(lambda tx : tx[0] + (tx[1],),  zip(prod[-1], values))
+        else:
+            prod.append(((x,) for x in values))
+
+    import itertools
+    prod = [list(l) for l in prod]
+    arguments = list(map(lambda tt: tuple(e for t in tt for e in t), product(*prod)))
+
+    if slurm_array_index is not None:
+        slurm_proto_ids = [(a_idx, j_idx) for a_idx,_ in enumerate(arguments) for j_idx in array_job_ids]
+        arguments = [a[:slurm_array_index] + (str(j_idx), ) + a[slurm_array_index:]
+                     for a in arguments
+                     for j_idx in array_job_ids
+                     ]
+    else:
+        slurm_proto_ids =itertools.repeat((0,None), len(arguments))
+
+    return arguments, slurm_proto_ids
+
+def parse_command_template(prog : List[str], num_arg_lists : int):
+    indices = {}
+    for i in range(len(prog)):
+        m = re.fullmatch(r'\{(\d+)\}', prog[i])
+        if m is not None:
+            k = int(m.group(1))
+            if k >= num_arg_lists:
+                raise UserError(f"argument index {k} used, but only {num_arg_lists} argument lists supplied (indexing "
+                                f"starts from 0).")
+            prog[i] = ArgIndexToken(k)
+            indices[k] = i
+
+    return prog, indices
+
+
+def parse_target(args):
+    slurm_array_index = args.index
+    found_arg_sep = False
+    indices = [0]
+
+    command = args.target
+
+    for i in range(len(command)):
+        if command[i] == ':::' or command[i] == '::::':
+            found_arg_sep = True
+            indices.append(i)
+            command[i] = ArgSepToken.SEP if command[i] == ':::' else ArgSepToken.SEP_FILE
+
+        elif command[i] == ':::+' or command[i] == '::::+':
+            if not found_arg_sep:
+                raise UserError('the first argument separator cannot be linking (:::+ or ::::+)')
+            indices.append(i)
+            command[i] = ArgSepToken.SEP_LINK if command[i] == ':::+' else ArgSepToken.SEP_FILE_LINK
+    indices.append(len(command))
+
+    arglist = []
+
+    for i,j in zip(indices, indices[1:]):
+        arglist.append(command[i:j])
+
+    prog = arglist.pop(0)
+    num_argument_lists = len(arglist)
+    prog, arg_indices = parse_command_template(prog, num_argument_lists)
+    commands = []
+
+    prog_args, slurm_proto_ids =  get_arguments(arglist, slurm_array_index)
+    if len(arg_indices) == 0:
+        for a in prog_args:
+            p = prog.copy()
+            for v in a:
+                if isinstance(v, list):
+                    p.extend(v)
+                else:
+                    p.append(v)
+            commands.append(p)
+    else:
+        for arguments in prog_args:
+            p = prog.copy()
+            for i,a in enumerate(arguments):
+                if i in arg_indices:
+                    p[arg_indices[i]] = a
+
+            p = [x if isinstance(x, list) else [x] for x in p]
+            p = [x for y in p for x in y]
+            commands.append(p)
+
+    return commands, slurm_proto_ids
+
+
+def ensure_directories_exist():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(SLURM_LOG_DIR, exist_ok=True)
+
+
+def panic(msg):
+    print(msg, file=sys.stderr)
+    sys.exit(1)
+
+
+def format_indices(indices : list):
+    indices = sorted(indices)
+    expr = []
+    start_range = indices[0]
+    end_range = indices[0]
+    def _fmt_range(s, e):
+        if s < e:
+            return f'{s}-{e}'
+        else:
+            return str(s)
+
+    for i in indices[1:]:
+        if i == end_range + 1:
+            end_range = i
+
+        else:
+            expr.append(_fmt_range(start_range,end_range))
+            start_range = i
+            end_range = i
+
+    expr.append(_fmt_range(start_range,end_range))
+    return ','.join(expr)
+
+async def retrieve_slurm_info(commands):
+    sem = asyncio.Semaphore(256) # limit to 256 child procs
+    async def get_info(command):
+        command = command + ['--slurminfo']
+        async with sem:
+            proc = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE)
+            slurm_json, _ = await proc.communicate()
+            if proc.returncode != 0:
+                msg = f"failed to get slurm infomation: `{command}` returned exit code: {proc.returncode:d}"
+                if proc.stderr:
+                    msg += f"\nSTDERR:\n{proc.stderr}"
+                raise UserError(msg)
+            else:
+                try:
+                    slurm_json = oru.slurm.parse_slurm_info(slurm_json.decode())
+                except Exception as e:
+                    raise UserError(f"failed to parse slurm information: " + str(e) + "\nSTDOUT\n" + proc.stdout.read())
+
+        return slurm_json
+
+    return await asyncio.gather(*[get_info(c) for c in commands])
+
+class SlurmInfoError(Exception):
+    pass
+
+async def _pipe_server_run(pr, pw, commands):
+    _, slurm_info = await asyncio.gather(_pipe_server_write_input(pw, commands), _pipe_server_read_output(pr))
+    return slurm_info
+
+async def _pipe_server_write_input(pw, commands):
+    with open(pw, 'w') as fp:
+        json.dump(commands, fp)
+
+async def _pipe_server_read_output(pr):
+    with open(pr, 'r') as fp:
+        slurm_info = json.load(fp)
+    return slurm_info
+
+
+def retrieve_slurm_info_pipe_server(commands):
+    if len(commands) == 0:
+        return []
+
+    (cr, pw) = os.pipe()
+    (pr, cw) = os.pipe()
+
+    cmd = commands[0] + ['--p-slurminfo', str(cr), str(cw)]
+    try:
+        proc = subprocess.Popen(cmd, pass_fds=(cr, cw))
+        os.close(cr)
+        os.close(cw)
+        slurm_info = asyncio.run(_pipe_server_run(pr, pw, commands))
+        proc.wait()
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+        raise SlurmInfoError("unable to retrieve slurm info",cmd, e)
+    return slurm_info
+
+
+def retrieve_queue_job_ids():
+    if SBATCH_FAKE:
+        return []
+    proc = subprocess.run(['squeue', '-o', "%50i'", '-r'], check=True, stdout=subprocess.PIPE)
+    stdout = proc.stdout.decode()
+    return list(map(lambda x : x.strip(), stdout.split('\n')[1:]))
+
+class SlurmArrayJob:
+    def __init__(self, sbatch_opts : Dict[str,str], script_preamble : str, name=None):
+        self._index = 0
+        self.indices = []
+        self.sbatch_opts = sbatch_opts
+        self.script_preamble = script_preamble
+        self.index_to_name = {}
+        self.index_to_logs = {}
+        self.index_cmd = {}
+        self.name = name
+
+    def add_job(self, name : str, out : str, err : str, cmd : List[str], index=None):
+        if index is None:
+            index = self._index
+            self._index += 1
+
+        assert index not in self.index_cmd, "duplicate array job index"
+        self.indices.append(index)
+        self.index_cmd[index] = cmd
+        self.index_to_name[index] = name
+        self.index_to_logs[index] = (os.path.abspath(out), os.path.abspath(err))
+
+
+    def get_job_script(self):
+        script = self.script_preamble + '\ncase $SLURM_ARRAY_TASK_ID in\n'
+        for i,command in self.index_cmd.items():
+            script += '{})\n\t{}\n;;\n'.format(str(i), " ".join(command))
+        script += 'esac\n'
+        return script
+
+    def get_sbatch_args(self):
+        sbatch_args = []
+        for key, val in self.sbatch_opts.items():
+            sbatch_args.extend(("--" + key, val))
+        if self.name is not None:
+            sbatch_args.extend(("--job-name", self.name))
+        sbatch_args.extend(("--array", format_indices(self.indices)))
+        sbatch_args.extend(("--out", os.path.join(SLURM_LOG_DIR, '%A_%a.out')))
+        sbatch_args.extend(("--err", os.path.join(SLURM_LOG_DIR, '%A_%a.err')))
+        return sbatch_args
+
+def command_submit(args):
+    commands, slurm_array_job_indices = parse_target(args)
+    commands = [list(filter(lambda x : x != '--', c)) for c in commands]
+    check_sbatch()
+    array_jobs : Dict[frozendict, SlurmArrayJob] = {}
+
+    try:
+        index_slurm_info = retrieve_slurm_info_pipe_server(commands)
+    except SlurmInfoError as e:
+        print(f"warning: {e.args[0]}: command `{' '.join(e.args[1])}` failed:\n\t{type(e.args[2]).__name__}: {e.args[2]!s}")
+        print("Spawning individual processes instead")
+        index_slurm_info = asyncio.run(retrieve_slurm_info(commands))
+
+    for command,slurm_info,(a_id, j_id) in zip(commands, index_slurm_info, slurm_array_job_indices):
+        array_job_group = list((k,slurm_info.pop(k)) for k in list(slurm_info.keys()) if k in SLURM_INFO_AGGREGATABLE)
+        array_job_group.append(('proto_id', str(a_id)))
+        array_job_group = frozendict(array_job_group)
+        if array_job_group not in array_jobs:
+            sbatch_opts = dict(array_job_group)
+            del sbatch_opts['proto_id']
+            script_preamble = sbatch_opts.pop('script')
+            array_jobs[array_job_group] = SlurmArrayJob(sbatch_opts, script_preamble, name=args.name)
+
+        array_jobs[array_job_group].add_job(slurm_info.get('job-name', 'null'), slurm_info['out'],
+                                         slurm_info['err'], command, index=j_id)
+
+
+
+    with shelve.open(DATABASE_FILE) as db:
+        for array_job in array_jobs.values():
+            bash_script_contents = array_job.get_job_script()
+            bash_script_file = tempfile.NamedTemporaryFile(mode='w', delete=False)
+            bash_script_file.file.write(bash_script_contents)
+            bash_script_file.file.close()
+
+            command = SBATCH_COMMAND + array_job.get_sbatch_args()
+            if args.dryrun:
+                command.append('--test-only')
+            command.append(bash_script_file.name)
+
+            if args.verbose:
+                print("-" * 80)
+                print(" ".join(command))
+                print(bash_script_file.name.center(80, '-'))
+                # print(bash_script_contents)
+                print(pygments.highlight(bash_script_contents, BashLexer(), Terminal256Formatter(style='monokai')))
+                print("-" * 80)
+
+            result = subprocess.run(command, stdout=subprocess.PIPE, text=True)
+
+            if result.returncode != 0:
+                os.remove(bash_script_file.name)
+                panic(f"command `{' '.join(command)}` exit with nonzero status {result.returncode:d}:")
+
+            if not args.dryrun:
+                job_id = result.stdout.strip()
+                for i,n in array_job.index_to_name.items():
+                    out,err = array_job.index_to_logs[i]
+                    db[f'{job_id}_{i}'] = {'name' : n, 'err' : err, 'out' : out}
+                db.sync()
+                print(f'Submitted job ID {job_id}')
+
+            os.remove(bash_script_file.name)
+
+
+def command_list(args):
+    with shelve.open(DATABASE_FILE) as db:
+        keys = db.keys()
+
+        if len(args.jobid) == 0:
+            matches = keys
+        elif args.regexp:
+            matches = []
+            for s in keys:
+                for p in args.jobid:
+                    if re.search(p,s) is not None:
+                        matches.append(s)
+                        break
+
+        else:
+            matches = args.jobid
+
+        for i in matches:
+            try:
+                print(f"{i}," + "{name},{out},{err}".format_map(db[i]))
+            except KeyError:
+                raise UserError(f'job id not found: {i}')
+
+def command_clear(args):
+    if len(glob.glob(os.path.join(SLURM_LOG_DIR, '*.out'))) > 0:
+        raise UserError('pending logs still exist, run `sbatch-harray push` first.')
+
+    for f in glob.glob(DATABASE_FILE + '.*'):
+        os.remove(f)
+    print('database cleared.')
+
+def command_push(args):
+    check_sbatch()
+    running_jobs = set(retrieve_queue_job_ids())
+    with shelve.open(DATABASE_FILE) as db:
+        for out in glob.glob(os.path.join(SLURM_LOG_DIR, '*.out')):
+            slurm_id = os.path.basename(out).rstrip('.out')
+            if slurm_id in running_jobs:
+                continue
+
+            err = out.rstrip('.out') + '.err'
+            if not os.path.exists(err):
+                panic(f'{slurm_id} has a STDOUT file but not STDERR')
+
+            db_row = db[slurm_id]
+            out_dest = db_row['out']
+            err_dest = db_row['err']
+            for src,dest in [(out,out_dest), (err, err_dest)]:
+                try:
+                    shutil.copyfile(src,dest)
+                    remove = True
+                except FileNotFoundError:
+                    print(f"error creating logfile {src}: missing directory {dest}")
+                    # panic(f'Missing directory: ' + os.path.dirname(dest))
+                    remove = False
+
+            if remove:
+                os.remove(out)
+                os.remove(err)
+
+def check_sbatch():
+    global SBATCH_COMMAND, SBATCH_FAKE
+    if shutil.which('sbatch') is None:
+        print('warning: `sbatch` could not be found, using `sbatch-fake` instead.', file=sys.stderr)
+        SBATCH_COMMAND[0] = 'sbatch-fake'
+        SBATCH_FAKE = True
+
+if __name__ == '__main__':
+    ensure_directories_exist()
+
+    subcommands = ('submit', 'list', 'clear', 'push')
+    argv = sys.argv.copy()[1:]
+    if len(argv) > 0:
+        if argv[0] not in subcommands and argv[0] not in ('-h', '--help'):
+            argv = ['submit'] + argv
+
+    p = argparse.ArgumentParser(allow_abbrev=False)
+    subparsers = p.add_subparsers()
+
+    submit = subparsers.add_parser('submit',help='Submit a heterogenous array job (default).')
+    submit.set_defaults(func=command_submit)
+    submit.add_argument("-v", "--verbose", action='store_true')
+    submit.add_argument("-d", "--dryrun", action='store_true',
+                   help="Don't submit anything.  Useful for debugging.")
+    submit.add_argument('-i', '--index', type=int, default=None,
+                        help="Use the argument list specified by INDEX as the Slurm array job index. "
+                             "The argument list specified must consist only of non-negative integers.")
+    submit.add_argument('-n', '--name', type=str, default=None,
+                        help="Give a name to the set of jobs to be filed.  Will be shown only in Slurm's db.")
+    submit.add_argument("target",
+                   help="target command to run.   It should be a shell command, followed by arguments lists, each "
+                        "preceded by SEP, which is one of: :::, :::+, ::::+ or ::::.  "
+                        "To read an argument list from a file, use :::: or ::::+. "
+                        "The `+` variants will 'zip' the following argument list with the previous argument list.  These"
+                        "may not be used as the first SEP.  "
+                        "See GNU parallel documentation for details on how to construct argument lists."
+                        "The target command must accept a --slurminfo switch, and when given this option, "
+                        "should print a JSON string to STDOUT containing all the necessary information before "
+                        "returning 0.", nargs=argparse.REMAINDER)
+    submit.usage = submit.format_usage()[7:-4] + "target SEP args_or_files [SEP args_or_files]..."
+    list_ = subparsers.add_parser('list', help='Print slurm job ids and job names of jobs managed by sbatch-harray.')
+    list_.set_defaults(func=command_list)
+    list_.add_argument('jobid', type=str, nargs='*', metavar='EXPR', default=[],
+                       help='Slurm job IDs to filter by.  If none are provided, all entries are printed.')
+    list_.add_argument('-r', '--regexp', action='store_true', help='Treat JOBIDs as Perl-compatible regular expressions.')
+
+    clear = subparsers.add_parser('clear', help='Clear all database entries.')
+    clear.set_defaults(func=command_clear)
+
+    push = subparsers.add_parser('push', help='Push pending log files to their destinations.  Only affects jobs not '
+                                              'in the Slurm queue.')
+    push.set_defaults(func=command_push)
+
+    oru.posix.setup_sigpipe()
+    if len(argv) == 0:
+        p.print_usage()
+        sys.exit(1)
+    else:
+        try:
+            args = p.parse_args(argv)
+            args.func(args)
+        except UserError as e:
+            print(f"error: {e.msg}", file=sys.stderr)
+            sys.exit(1)
+

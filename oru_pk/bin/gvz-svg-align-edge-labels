@@ -1,0 +1,21 @@
+#!/usr/bin/env python
+from oru.graphviz import svg_align_edge_labels
+from oru.posix import setup_sigpipe
+import argparse
+
+if __name__ == '__main__':
+    setup_sigpipe()
+    p = argparse.ArgumentParser(description=""
+    "Fixes edge labels in SVGs produced by Graphviz programs like dot and neato. Labels will be rotated to be parallel "
+    "with their parent edge and positioned at the middle of the edge.")
+    p.add_argument("input", help="Path to input SVG. Use '-' for STDIN.")
+    p.add_argument("output", default='-',nargs='?',
+                   help="Path to output SVG.  Use '-' for STDOUT. Default is '%(default)s'.")
+    p.add_argument('-i', action='store_true',
+                   help="Modify the input file in-place and don't write to STDOUT.")
+    p.add_argument('-y', default=10, type=float,
+                   help="Apply an additional offset of Y pixels to the edge label. Default is %(default)s.")
+    args = p.parse_args()
+    if args.i:
+        args.output = args.input
+    svg_align_edge_labels(args.input, args.output, y_shift_px=args.y)

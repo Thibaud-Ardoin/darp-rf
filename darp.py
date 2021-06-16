@@ -1,8 +1,8 @@
 from oru import *
-from oru.slurm import slurm_format_time
+# from C import slurm_format_time
 from typing import FrozenSet, Tuple, Union
-from utils import *
-from utils.data import DARP_Data, get_named_instance_DARP, modify, indices, get_name_by_index, SDARP_Data
+from dialRL.strategies.external.darp_rf.utils import *
+from dialRL.strategies.external.darp_rf.utils.data import DARP_Data, get_named_instance_DARP, modify, indices, get_name_by_index, SDARP_Data
 import yaml
 from gurobi import *
 import json
@@ -205,7 +205,7 @@ def _pmap(i : int, n : int):
 
 def get_early_schedule(path, data: DARP_Data, start_time=0, check_illegal=True):
     #adapted from Hunsaker and Savelsbergh 2002, Tang 2010
-    # the difference here is that we don't have a maximum waiting time.
+    # the difference here is that we don't have a maximum waiting times
 
     # need to add on the depot nodes to check max route duration.
     o_depot_loc = 0
@@ -742,7 +742,7 @@ class DARP_Experiment(BaseExperiment):
 
     @property
     def resource_time(self) -> str:
-        return slurm_format_time(self.parameters['timelimit'] + 300)
+        return slurm.slurm_format_time(self.parameters['timelimit'] + 300)
 
 NAMED_DATASET_INDICES = {
     'all': indices.set_from_ranges_inc([(0, 67)]),

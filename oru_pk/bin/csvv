@@ -1,0 +1,111 @@
+#!/usr/bin/env python
+import argparse
+import tabulate
+import csv
+from oru import posix
+
+class ParseError(BaseException):
+    def __init__(self, msg, lineno=None):
+        self.msg = msg
+        self.lineno = lineno
+
+class LineParser:
+    def __init__(self, float_fmt=None, int_fmt=None, sep=",", quote_chars=("'", "\"")):
+        self.sep=sep
+        self.quote_chars=quote_chars
+        self.parse_numbers = float_fmt is not None or int_fmt is not None
+        self.float_fmt = f"{{:{float_fmt}}}" if float_fmt is not None else None
+        self.int_fmt = f"{{:{int_fmt}}}" if int_fmt is not None else None
+
+    def __call__(self, line : str, lineno=None):
+        line = line.strip()
+        quote_state = None
+        starts = [0]
+        ends = []
+        n = len(line)
+        k = 0
+        while k < n:
+            char = line[k]
+            if quote_state is None:
+                if char == self.sep:
+                    ends.append(k)
+                    k += 1
+                    starts.append(k)
+                elif char in self.quote_chars:
+                    if starts[-1] != k:
+                        raise ParseError("whole field must be quoted: " + line[starts[:-1], k+10] + "...", lineno)
+                    quote_state = char
+                    k += 1
+                    starts[-1] = k
+                else:
+                    k += 1
+            elif char == quote_state:
+                quote_state = None
+                if k < len(line) - 1 and line[k+1] != self.sep:
+                    raise ParseError("whole field must be quoted: " + line[starts[-1]:k + 10] + "...", lineno)
+                ends.append(k)
+                k += 2
+                starts.append(k)
+            else:
+                k += 1
+
+
+        if quote_state is not None:
+            raise ParseError(f"unmatched delimiter ({quote_state}): {line}", lineno)
+        ends.append(len(line))
+        tokens = []
+        for i,j in zip(starts, ends):
+            token = line[i:j]
+            if self.parse_numbers:
+                token = self.format_number(self.try_parse_number(token))
+            tokens.append(token)
+
+        return tokens
+
+    def try_parse_number(self, num):
+        try:
+            return int(num)
+        except ValueError:
+            pass
+
+        try:
+            return float(num)
+        except ValueError:
+            pass
+
+        return num
+
+    def format_number(self, val):
+        if self.float_fmt and  isinstance(val, float):
+            return self.float_fmt.format(val)
+        else:
+            return str(val)
+
+
+if __name__ == '__main__':
+    posix.setup_sigpipe()
+    p = argparse.ArgumentParser(description="CSV Viewer.  Pretty-prints CSVs.")
+    p.add_argument('csvfile', default='-',
+                   help="Path to CSV file, defaults to STDIN", nargs='?')
+    p.add_argument('-s','--sep',type=str,default=',',
+                   help="Column separator. Default is `%(default)s`")
+    p.add_argument('-d', '--delim', type=str, default="\'\"",
+                   help="Delimiters. Default is `%(default)s`"
+                   )
+    p.add_argument('-f', '--fmt', type=str, default='plain',
+                   help="Table format. Must be once of: "+",".join(tabulate.tabulate_formats) +
+                        ".  Default is %(default)s.")
+    p.add_argument('-F', '--float', type=str, default=None,
+                   help="Python floating point format string.  Default is none, which does not format floats.")
+
+    args = p.parse_args()
+    parse_line = LineParser(sep=args.sep, quote_chars=args.delim, float_fmt=args.float)
+    with posix.open_default_stdin(args.csvfile) as f:
+        try:
+            contents = list(map(lambda li : parse_line(li[1], li[0]), enumerate(f)))
+        except ParseError as e:
+            print(f"error on line {e.lineno:4d}: {e.msg}")
+            quit(1)
+
+    floatfmt = args.float or tabulate._DEFAULT_FLOATFMT
+    print(tabulate.tabulate(contents, tablefmt=args.fmt, floatfmt=floatfmt))

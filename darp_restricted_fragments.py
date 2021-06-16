@@ -3,7 +3,7 @@ from oru.grb import BinVarDict, IntVar, CtsVar
 from oru import slurm
 from gurobi import *
 from typing import Tuple
-from utils.data import modify, DARP_Data
+from dialRL.strategies.external.darp_rf.utils.data import modify, DARP_Data
 from collections import OrderedDict
 
 F_DBG = ResFrag(start=LNode(loc=5, load=frozenset()), end=LNode(loc=28, load=frozenset()), path=(5, 12, 4, 29, 36, 28))
@@ -57,11 +57,11 @@ class Dominator:
                 domdict[None].add(f)
                 continue
 
-            earliest_schedule = get_early_schedule(f.path, data)
-            latest_schedule = get_late_schedule(f.path, data)
+            earliest_schedule = get_early_schedule(f.path, self.data)
+            latest_schedule = get_late_schedule(f.path, self.data)
             assert latest_schedule is not None
-            earliest_late_schedule = get_late_schedule(f.path, data, end_time=earliest_schedule[-1])
-            latest_early_schedule = get_early_schedule(f.path, data, start_time=latest_schedule[0])
+            earliest_late_schedule = get_late_schedule(f.path, self.data, end_time=earliest_schedule[-1])
+            latest_early_schedule = get_early_schedule(f.path, self.data, start_time=latest_schedule[0])
             assert earliest_late_schedule is not None
             assert latest_early_schedule is not None
 
@@ -586,7 +586,7 @@ class Network:
 
         for f in self.fragments:
             if f.path not in self.path_cost:
-                self.path_cost[f.path] = calc_path_cost(f.path, data)
+                self.path_cost[f.path] = calc_path_cost(f.path, self.data)
 
         if self.filter_fragments:
             self.add_arcs_and_nodes()

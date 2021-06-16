@@ -1,0 +1,124 @@
+#!/usr/bin/env python
+import pandas as pd
+from pathlib import Path
+import re
+import argparse
+from oru import posix
+
+S = "s"
+OOM = 'oom'
+MUU = 'muu'
+TUU = 'tuu'
+TO = 'to'
+UF = 'uf'
+
+THRESH_TUU = .3
+THRESH_MUU = .3
+THRESH_OOM = .85
+
+SELECTOR_SHORT_DESC = {
+    S : "Success",
+    OOM : "Out-of-Memory",
+    TO : "Time-Out",
+    MUU : "Memory Under-Utilisation",
+    TUU : "Time Under-Utilisation",
+    UF : "Unidentified Failures"
+}
+
+SELECTOR_DESC = {
+    S : "instances which ran successfully",
+    OOM : "instances which ran out of memory",
+    TO : f"instances which ran out of time",
+    MUU : f"instances which have excess memory (use up {THRESH_MUU*100:.0f}% of limit)",
+    TUU : f"instances which have excess time (use up {THRESH_TUU*100:.0f}% of limit)",
+    UF : f"instances which failed but the reason for which is not clear"
+}
+SELECTOR_CACHE = {}
+SELECTORS = {}
+def selector(name):
+    def decorator(func):
+        SELECTORS[name] = func
+        def wrapper(*args, **kwargs):
+            if name not in SELECTOR_CACHE:
+                val = func(*args, **kwargs)
+                SELECTOR_CACHE[name] = val
+            return SELECTOR_CACHE[name]
+        return wrapper
+    return decorator
+
+
+
+@selector(TO)
+def _(log):
+    return log['State'] == 'TIMEOUT'
+
+@selector(OOM)
+def _(log):
+    return ~SELECTORS[S](log) & ((log['MaxRSS']/log['ReqMem']) > THRESH_OOM) & ~SELECTORS[TO](log)
+
+@selector(S)
+def _(log):
+    return (log['State'] == 'COMPLETED')
+
+@selector(MUU)
+def _(log):
+    return SELECTORS[S](log) & ((log['MaxRSS']/log['ReqMem']) < THRESH_MUU)
+
+@selector(UF)
+def _(log):
+    return ~SELECTORS[S](log) & ~(SELECTORS[OOM](log) | SELECTORS[TO](log))
+
+
+@selector(TUU)
+def _(log):
+    return SELECTORS[S](log) & ((log['ElapsedRaw']/log['TimelimitRaw']) < THRESH_TUU)
+
+def print_table(selector, log : pd.DataFrame):
+    display_cols = ['Elapsed', 'Timelimit', 'MaxRSS-f', 'ReqMem-f', 'State']
+    mask = SELECTORS[selector](log)
+    display = log.loc[mask, display_cols]
+    if len(display) > 0:
+        print(f"{SELECTOR_SHORT_DESC[selector]}: {SELECTOR_DESC[selector]}")
+        print(display)
+        print()
+
+if __name__ == '__main__':
+    posix.setup_sigpipe()
+    epilog = "SELECTOR DESCRIPTIONS".center(80, '-') + '\n\n'
+    epilog += "\n\n".join(f"{s:>3s} ({SELECTOR_SHORT_DESC[s]}): {SELECTOR_DESC[s]}" for s in SELECTORS)
+    p = argparse.ArgumentParser(epilog=epilog, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument('log', nargs='?', default='-')
+    p.add_argument('-v','--verbose', action='store_true')
+    p.add_argument('-i', '--id-only', choices=SELECTOR_DESC, default=None,
+                   help='Only print the JobIDs which match the selection (see below for a description of each selector)')
+    args = p.parse_args()
+
+    pd.options.display.max_rows = 999
+    with posix.open_default_stdin(args.log, mode='r') as fp:
+        log = pd.read_csv(fp, index_col="JobID")
+
+    prop_time = log['ElapsedRaw']/log['TimelimitRaw']
+    prop_mem = log['MaxRSS']/log['ReqMem']
+
+    mask_fail = log['State'] != 'COMPLETED'
+    mask_timeout = log['State'] == 'TIMEOUT'
+    mask_more_mem = prop_mem > THRESH_OOM
+
+    for c in ['MaxRSS', 'ReqMem']:
+        log[c + "-f"] = log[c].apply(lambda mem : f"{mem*10/2**30:.2f}Gb")
+
+    display_cols = ['Elapsed', 'Timelimit', 'MaxRSS-f', 'ReqMem-f', 'State']
+    timeouts = log.loc[mask_timeout, display_cols]
+
+    if args.id_only is None:
+        if args.verbose:
+            print_table(MUU, log)
+            print_table(TUU, log)
+
+        print_table(OOM, log)
+        print_table(TO, log)
+        print_table(UF, log)
+    else:
+        mask = SELECTORS[args.id_only](log)
+        for x in log[mask].index:
+            print(x)

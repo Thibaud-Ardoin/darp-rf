@@ -1,0 +1,12 @@
+#!/usr/bin/env python
+import argparse
+from oru import slurm, posix
+
+if __name__ == '__main__':
+    posix.setup_sigpipe()
+    p = argparse.ArgumentParser()
+    p.add_argument('-s', type=str, default='\n', help="Separator between items.  Default is newline.")
+    p.add_argument('array_spec', type=slurm.array_range, help="Slurm array specification string.")
+    args = p.parse_args()
+    print(args.s.join(map(str, args.array_spec)))
+

@@ -1,0 +1,24 @@
+#!/usr/bin/env python
+
+
+if __name__ == '__main__':
+    import argparse
+    import os
+    import sys
+    p = argparse.ArgumentParser()
+    p.add_argument("-c", "--cpus", type=int, default=1)
+    p.add_argument('-m', "--mem", type=str, default='8G')
+    p.add_argument('-t', '--time', type=str, default='1:00:00')
+    p.add_argument("-C", "--constraint",type=str, default=None)
+    args = p.parse_args()
+
+    srun = ['srun', '--time', args.time, '-N', '1', '-n', '1', '-c', str(args.cpus), '--mem', args.mem, '--pty']
+    if args.constraint:
+        srun.extend(["--constraint", args.constraint])
+    srun.append('/bin/bash')
+    print('running:',' '.join(srun), file=sys.stderr)
+    sys.stderr.flush()
+    try:
+        os.execvp(srun[0],srun)
+    except FileNotFoundError:
+        print("error: srun not found on PATH",file=sys.stderr)

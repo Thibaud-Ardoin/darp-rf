@@ -1,0 +1,92 @@
+#!/usr/bin/env python
+from oru import posix
+from oru.slurm import slurm_parse_time
+import argparse
+import pandas as pd
+import numpy as np
+import re
+
+pd.set_option('display.max_columns', 100)
+pd.set_option('display.width', 99999999999999999999999)
+
+def parse_slurm_si_unit(s):
+    if not isinstance(s, str):
+        return s
+    si = {
+        'K' : 10,
+        'M' : 20,
+        'G' : 30
+    }
+    if s[-1] in si:
+        power = si[s[-1]]
+        s = s[:-1]
+    else:
+        power = 0
+
+    try:
+        q = int(s[:-1])
+    except ValueError:
+        try:
+            q = float(s[:-1])
+        except ValueError:
+            return s
+
+    return q*(2**power)
+
+def parse_array_job_id(s):
+    m = re.fullmatch('(\d+)_(\d+)', s)
+    if not m:
+        return -1,-1
+    return int(m.group(1)),int(m.group(2))
+
+def process_sacct_log(filename : str) -> pd.DataFrame:
+    with posix.open_default_stdin(filename, mode='r') as fp:
+        df = pd.read_csv(fp, sep='|', index_col='JobID')
+    df.drop(df[df.index.map(lambda s : '[' in s)].index, inplace=True)
+    batch_steps = df.index.map(lambda x : x.endswith('.batch')).values.astype(np.bool)
+    jobs = df.loc[~batch_steps, :].copy()
+    batch_steps = df.copy().loc[batch_steps, :]
+    ignore_from_step = ["AllocTRES", "JobName", "JobIDRaw", "State"]
+    batch_steps.drop(axis=1,columns=ignore_from_step, inplace=True)
+    batch_steps.index = batch_steps.index.map(lambda x : x.rstrip('.batch'))
+    jobs.update(batch_steps)
+    jobs.dropna(axis=1, how='all', inplace=True)
+    id_cols = [c for c in jobs.columns if 'ID' in c]
+    jobs[id_cols] = jobs[id_cols].astype(np.int)
+    jobs = jobs.applymap(parse_slurm_si_unit)
+    jobs['ReqMem'] = jobs['ReqMem'].apply(lambda x : parse_slurm_si_unit(x.rstrip('n')))
+
+    arrayjob_id = jobs.index.map(parse_array_job_id)
+
+    jobs['JobArrayIndex'] = list(map(lambda x : x[1], arrayjob_id))
+    jobs['JobArrayID'] = list(map(lambda x : x[0], arrayjob_id))
+    jobs['TimelimitRaw'] = jobs['Timelimit'].apply(slurm_parse_time)
+
+    for f in args.filters:
+        f(jobs)
+
+    jobs.sort_values(['JobArrayID', 'JobArrayIndex'], inplace=True)
+    return jobs
+
+def create_filter(column, pattern):
+    r = re.compile(pattern)
+    def f(df : pd.DataFrame):
+        mapfunc = lambda s : r.search(str(s)) is None
+        if column == df.index.name:
+            mask = df.index.map(mapfunc)
+        else:
+            mask = df[column].map(mapfunc)
+        df.drop(df[mask].index, inplace=True)
+    return f
+
+if __name__ == '__main__':
+    posix.setup_sigpipe()
+    p = argparse.ArgumentParser()
+    p.add_argument('logfile', type=str, default='-', nargs='?')
+    p.add_argument('outfile', type=str, default='-', nargs='?')
+    p.add_argument('-f', '--filter', nargs=2, action='append', dest='filters', default=[])
+    args = p.parse_args()
+    args.filters = [create_filter(*f) for f in args.filters]
+    df = process_sacct_log(args.logfile)
+    with posix.open_default_stdout(args.outfile, "w") as fp:
+        df.to_csv(fp)

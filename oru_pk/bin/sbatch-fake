@@ -1,0 +1,144 @@
+#!/usr/bin/env python
+import argparse
+import random
+import re
+import os
+import datetime
+import sys
+import sqlite3
+
+
+
+def check_matches_regexp(pattern):
+    def check(string):
+        if not re.fullmatch(pattern, string):
+            raise ValueError(f"{string} did not match regexp: {pattern}")
+        return string
+    return check
+
+def check_file_exists(path):
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
+    return path
+
+def array_indices(string):
+    return string
+
+if __name__ == '__main__':
+    sbatch = argparse.ArgumentParser()
+    sbatch.add_argument("script", nargs=1,type=check_file_exists)
+    sbatch.add_argument("args", nargs='*')
+    sbatch.add_argument('-a', '--array', nargs=1, type=array_indices)
+    sbatch.add_argument('-A', '--account', nargs=1)
+    sbatch.add_argument('--acctg-freq', nargs=1)
+    sbatch.add_argument('-B', '--extra-node-info', nargs=1)
+    sbatch.add_argument('--batch', nargs=1)
+    sbatch.add_argument('--bb', nargs=1)
+    sbatch.add_argument('--bbf', nargs=1)
+    sbatch.add_argument('-b', '--begin', nargs=1)
+    sbatch.add_argument('--checkpoint', nargs=1)
+    sbatch.add_argument('--cluster-constraint', nargs=1)
+    sbatch.add_argument('--comment', nargs=1)
+    sbatch.add_argument('-C', '--constraint', nargs=1)
+    sbatch.add_argument('--contiguous')
+    sbatch.add_argument('--cores-per-socket', nargs=1)
+    sbatch.add_argument('--cpu-freq', nargs=1)
+    sbatch.add_argument('--cpus-per-gpu', nargs=1, type=int)
+    sbatch.add_argument('--cpus-per-task', nargs=1, type=int)
+    sbatch.add_argument('--deadline', nargs=1)
+    sbatch.add_argument('--delay-boot', nargs=1)
+    sbatch.add_argument('-d', '--dependency', nargs=1)
+    sbatch.add_argument('-D', '--chdir', nargs=1)
+    sbatch.add_argument('--exclusive', nargs=1)
+    sbatch.add_argument('--export-file', nargs=1, type=check_file_exists)
+    sbatch.add_argument('--export', nargs=1)
+    sbatch.add_argument('-e','--error', nargs=1)
+    sbatch.add_argument('-F', '--nodefile', nargs=1, type=check_file_exists)
+    sbatch.add_argument('--get-user-env', nargs=1)
+    sbatch.add_argument('--gid', nargs=1)
+    sbatch.add_argument('-G', '--gpus', nargs=1)
+    sbatch.add_argument('--gpu-bind', nargs=1)
+    sbatch.add_argument('--gpu-freq', nargs=1)
+    sbatch.add_argument('--gpus-per-node', nargs=1)
+    sbatch.add_argument('--gpus-per-socket', nargs=1)
+    sbatch.add_argument('--gpus-per-task', nargs=1)
+    sbatch.add_argument('--gres', nargs=1)
+    sbatch.add_argument('--gres-flags', nargs=1)
+    sbatch.add_argument('-H', '--hold', action='store_true')
+    sbatch.add_argument('--hint', nargs=1)
+    sbatch.add_argument('--ignore-pbs', action='store_true')
+    sbatch.add_argument('-i','--input', nargs=1, type=check_file_exists)
+    sbatch.add_argument('-J', '--job-name', nargs=1)
+    sbatch.add_argument('-k', '--no-kill', action='store_true')
+    sbatch.add_argument('--kill-on-invalid-dep', nargs=1)
+    sbatch.add_argument('-L', '--licenses', nargs=1)
+    sbatch.add_argument('-M', '--clusters', nargs=1)
+    sbatch.add_argument('-m', '--distribution', nargs=1)
+    sbatch.add_argument('--mail-type', nargs=1,
+                        type=check_matches_regexp(r'(NONE|BEGIN|END|FAIL|REQUEUE|ALL|STAGE_OUT|TIME_LIMIT(_[985]0)?)'))
+    sbatch.add_argument('--mail-user', nargs=1)
+    sbatch.add_argument('--mcs-label', nargs=1)
+    sbatch.add_argument('--mem', nargs=1, type=check_matches_regexp(r'\d+([KMG]B)?'))
+    sbatch.add_argument('--mem-per-cpu', nargs=1, type=check_matches_regexp(r'\d+[KMGTkmgt]?'))
+    sbatch.add_argument('--mem-per-gpu', nargs=1, type=check_matches_regexp(r'\d+[KMGTkmgt]?'))
+    sbatch.add_argument('--mem-bind', nargs=1, type=str)
+    sbatch.add_argument('--min-cpus-bind', nargs=1, type=int)
+    sbatch.add_argument('-N','--nodes', nargs=1, type=check_matches_regexp(r'\d+(-\d+)?'))
+    sbatch.add_argument('-n','--ntasks', nargs=1, type=int)
+    sbatch.add_argument('--network', nargs=1)
+    sbatch.add_argument('--nice', nargs=1)
+    sbatch.add_argument('--no-requeue', nargs=1)
+    sbatch.add_argument('--ntasks-per-core', nargs=1, type=int)
+    sbatch.add_argument('--ntasks-per-node', nargs=1, type=int)
+    sbatch.add_argument('--ntasks-per-socket', nargs=1, type=int)
+    sbatch.add_argument('-O', '--overcommit', action='store_true')
+    sbatch.add_argument('-o', '--output', nargs=1)
+    sbatch.add_argument('--open-mode', nargs=1, type=check_matches_regexp(r'(append|truncate)'))
+    sbatch.add_argument('--parsable', action='store_true')
+    sbatch.add_argument('-p', '--partition', action='store_true')
+    sbatch.add_argument('--power', nargs=1)
+    sbatch.add_argument('--priority', nargs=1)
+    sbatch.add_argument('--profile', nargs=1)
+    sbatch.add_argument('--propagate', nargs=1)
+    sbatch.add_argument('-q','--qos', nargs=1)
+    sbatch.add_argument('-Q','--quiet', action='store_true')
+    sbatch.add_argument('--reboot', action='store_true')
+    sbatch.add_argument('--requeue', action='store_true')
+    sbatch.add_argument('--reservation', action='store_true')
+    sbatch.add_argument('-s', '--oversubscribe', action='store_true')
+    sbatch.add_argument('-S', '--core-spec', type=int, nargs=1)
+    sbatch.add_argument('--signal', nargs=1)
+    sbatch.add_argument('--sockets-per-node', nargs=1, type=int)
+    sbatch.add_argument('--spread-job', action='store_true')
+    sbatch.add_argument('--switches', nargs=1)
+    sbatch.add_argument('-t', '--time', nargs=1,
+                        type=check_matches_regexp('(\d+-)?\d+((:\d+)?:\d+)?'))
+    sbatch.add_argument('--test-only', action='store_true')
+    sbatch.add_argument('--thread-spec', nargs=1, type=int)
+    sbatch.add_argument('--threads-per-core', nargs=1, type=int)
+    sbatch.add_argument('--time-min',nargs=1,
+                        type=check_matches_regexp('(\d+-)?\d+((:\d+)?:\d+)?'))
+    sbatch.add_argument('--tmp', nargs=1)
+    sbatch.add_argument('--usage',action='store_true')
+    sbatch.add_argument('--uid', nargs=1)
+    sbatch.add_argument('--use-min-nodes', action='store_true')
+    sbatch.add_argument('-V','--version', action='store_true')
+    sbatch.add_argument('--verbose', action='store_true')
+    sbatch.add_argument('-w', '--nodelist', nargs=1)
+    sbatch.add_argument('-W', '--wait', action='store_true')
+    sbatch.add_argument('--wait-all-nodes',nargs=1,type=check_matches_regexp('[01]'))
+    sbatch.add_argument('--wckey', nargs=1)
+    sbatch.add_argument('--wrap', nargs=1)
+    sbatch.add_argument('-x', "--exclude", nargs=1)
+
+    args = sbatch.parse_args()
+
+    slurm_id = random.randint(100000,
+                              199999)
+    if args.test_only:
+        t = datetime.datetime.now().isoformat(timespec='seconds')
+        print(f'sbatch: Job {slurm_id:d} to start at {t} using 1 processors on PARTITION', file=sys.stderr)
+    elif args.parsable:
+        print(slurm_id)
+    else:
+        print(f'Submitted batch job {slurm_id}')
