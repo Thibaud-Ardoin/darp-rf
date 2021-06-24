@@ -45,6 +45,15 @@ def run_rf_algo(file_nb):
 
     stopwatch = Stopwatch()
     exp = DARPRestrictedFragmentsExperiment.from_cl_args(file_nb)
+    exp.parameters['NS_heuristic'] = False
+    exp.parameters['FR_heuristic'] = False
+    exp.parameters['heuristic_stop_gap'] = 1
+    exp.parameters['triad_cuts'] = False
+    exp.parameters['AF_cuts'] = False
+    exp.parameters['FF_cuts'] = False
+    exp.parameters['FA_cuts'] = False
+    exp.parameters['cut_violate'] = False
+    exp.parameters['ap2c'] = False
     # get_output_path
 
     exp.print_summary_table()
