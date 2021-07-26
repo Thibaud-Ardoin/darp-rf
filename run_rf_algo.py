@@ -54,6 +54,7 @@ def run_rf_algo(file_nb):
     exp.parameters['FA_cuts'] = False
     exp.parameters['cut_violate'] = False
     exp.parameters['ap2c'] = False
+    exp.inputs['sdarp'] = False
     # get_output_path
 
     exp.print_summary_table()
@@ -240,4 +241,4 @@ def run_rf_algo(file_nb):
         output.print_line(k, v)
 
     write_info_file(exp, times,network, obj_info,cut_counter, model)
-    return exp.outputs['solution']
+    return exp.outputs['solution'], model.ObjVal, model.ObjBound

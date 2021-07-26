@@ -5,6 +5,7 @@ from gurobi import *
 from typing import Tuple
 from dialRL.strategies.external.darp_rf.utils.data import modify, DARP_Data
 from collections import OrderedDict
+from icecream import ic
 
 F_DBG = ResFrag(start=LNode(loc=5, load=frozenset()), end=LNode(loc=28, load=frozenset()), path=(5, 12, 4, 29, 36, 28))
 
